@@ -440,6 +440,7 @@ let dir="out", curView="add", curRep="bs";
 /* ---------- storage: IndexedDB first, with two mirrors behind it ---------- */
 const HAS_WS = typeof window!=="undefined" && window.storage && typeof window.storage.get==="function";
 let idb=null;
+const SNAPKEY="ledger_snaps";
 function openIdb(){
   return new Promise(res=>{
     if(!("indexedDB" in window)) return res(null);
@@ -483,6 +484,7 @@ async function load(){
   if(S.sinceBackup==null) S.sinceBackup=0;
   if(!S.recent) S.recent=[];
   if(!S.meta) S.meta={rev:0};
+  if(S.meta.dirty===undefined) S.meta.dirty=(S.meta.rev||0)>0;
   migratePeople();
   try{ if(navigator.storage&&navigator.storage.persist) navigator.storage.persist(); }catch(e){}
 }
@@ -514,25 +516,48 @@ function migratePeople(){
   });
 }
 let saveWarned=false;
-function save(){
+function persist(){
   const txt=JSON.stringify(S);
   let ok=false;
   idbPut(KEY,txt).then(r=>{if(r)ok=true;});
   try{localStorage.setItem(KEY,txt);ok=true;}catch(e){}
   if(HAS_WS){ try{window.storage.set(KEY,txt).catch(()=>{});ok=true;}catch(e){} }
   if(!ok&&!saveWarned){saveWarned=true;toast("Not saving. Export a backup before you close this.");}
+  return ok;
+}
+function save(){
+  if(!S.meta) S.meta={};
+  if(!cloud.applying) S.meta.dirty=true;
+  persist();
   if(typeof pushRemote==="function") pushRemote(false);
   paintNag();
 }
 /* rolling restore points, kept only in IndexedDB so they cannot crowd out the live copy */
-async function snapshot(reason){
-  if(!idb) return;
-  let list=[]; try{list=JSON.parse(await idbGet("snaps")||"[]");}catch(e){}
-  list.unshift({at:new Date().toISOString(),reason,entries:(S.entries||[]).length,data:JSON.stringify(S)});
-  await idbPut("snaps",JSON.stringify(list.slice(0,4)));
+var snapsBroken=false;
+async function snapshot(reason,snapData,snapCount){
+  const data=(snapData!==undefined)?snapData:JSON.stringify(S);
+  const count=(snapCount!==undefined)?snapCount:((S.entries||[]).length);
+  let list=await listSnapshots();
+  list.unshift({at:new Date().toISOString(),reason,entries:count,data:data});
+  list=list.slice(0,8);
+  const txt=JSON.stringify(list);
+  let kept=false;
+  if(idb){ try{ kept=!!(await idbPut("snaps",txt)); }catch(e){} }
+  if(!kept){
+    /* IndexedDB absent, or still opening when the 1.5s timeout fired. localStorage is
+       smaller, so thin the ring until it fits rather than keeping nothing. */
+    let n=list.length;
+    while(n>0){
+      try{ localStorage.setItem(SNAPKEY,JSON.stringify(list.slice(0,n))); kept=true; break; }
+      catch(e){ n--; }
+    }
+  }
+  snapsBroken=!kept;
+  return kept;
 }
 async function listSnapshots(){
-  try{return JSON.parse(await idbGet("snaps")||"[]");}catch(e){return [];}
+  if(idb){ try{ const v=await idbGet("snaps"); if(v) return JSON.parse(v); }catch(e){} }
+  try{ return JSON.parse(localStorage.getItem(SNAPKEY)||"[]"); }catch(e){ return []; }
 }
 function backupOverdue(){
   const days = S.lastBackup ? Math.round((Date.parse(today())-Date.parse(S.lastBackup))/864e5) : 999;
@@ -676,12 +701,45 @@ function watchRemote(){
     cloud.last={device:d.device,at:d.at};
     if(d.device===devId()){ paintSync(); return; }
     const mine=(S.meta&&S.meta.rev)||0;
-    if((d.rev||0)<=mine){ paintSync(); return; }
+    const bare=function(o){ try{ const c=JSON.parse(typeof o==="string"?o:JSON.stringify(o));
+      delete c.meta; return JSON.stringify(c); }catch(e){ return null; } };
+    if((d.rev||0)===mine && bare(d.data)!==null && bare(d.data)===bare(S)){
+      if(!S.meta) S.meta={};
+      S.meta.baseRev=d.rev; S.meta.dirty=false; cloud.conflict=""; cloud.theirs=null;
+      persist(); paintSync(); return;
+    }
+    if((d.rev||0)===mine){
+      /* item 21: same revision number from a different device means both edited from
+         the same starting point. Neither copy is authoritative — say so, overwrite neither. */
+      try{ snapshot("your copy, kept when the devices disagreed",JSON.stringify(S),(S.entries||[]).length); }catch(e){}
+      cloud.conflict="Your other device saved a different version of revision "+mine+
+        ". Nothing has been overwritten. Export a backup, then choose which copy to keep.";
+      cloud.theirs=d; paintSync();
+      toast("Conflict with your other device — see Sync.");
+      return;
+    }
+    if((d.rev||0)<mine){ paintSync(); return; }
     try{
       const inc=JSON.parse(d.data);
+      /* Capture this device's bytes BEFORE anything is replaced — snapshot() is async
+         and would otherwise record the incoming copy under a "before" label. */
+      const localBytes=JSON.stringify(S), localCount=(S.entries||[]).length;
+      if(S.meta&&S.meta.dirty){
+        /* Entries were made here and never reached the cloud. Adopting would destroy
+           them silently, so keep both copies and let the user choose. */
+        try{ snapshot("your copy, kept when the devices disagreed",localBytes,localCount); }catch(e){}
+        cloud.conflict="This device has changes that never reached the cloud ("+localCount+
+          " entries here in total), and your other device has since saved revision "+(d.rev||0)+
+          ". Nothing has been overwritten. Export a backup, then choose which copy to keep.";
+        cloud.theirs=d; paintSync();
+        toast("Both devices changed — see Sync.");
+        return;
+      }
+      try{ snapshot("before taking your other device's copy",localBytes,localCount); }catch(e){}
       cloud.applying=true;
       S=inc; if(!S.meta) S.meta={};
-      S.meta.rev=d.rev;
+      S.meta.rev=d.rev; S.meta.baseRev=d.rev; S.meta.dirty=false;
+      cloud.conflict=""; cloud.theirs=null;
       save();
       cloud.applying=false;
       repaint(); paintSync();
@@ -694,18 +752,37 @@ function watchRemote(){
 }
 
 function pushRemote(now){
-  if(!cloud.ready||!cloud.user||cloud.applying) return;
   clearTimeout(cloud.timer);
+  if(!cloud.ready||!cloud.user||cloud.applying) return;
   cloud.timer=setTimeout(async function(){
     try{
-      const doc=cloud.fs.doc, setDoc=cloud.fs.setDoc;
+      const doc=cloud.fs.doc, setDoc=cloud.fs.setDoc, getDoc=cloud.fs.getDoc;
       if(!S.meta) S.meta={};
-      S.meta.rev=(S.meta.rev||0)+1;
-      const payload={rev:S.meta.rev,device:devId(),
+      /* item 21: check nobody moved the cloud copy on since the revision we started from,
+         instead of overwriting it blind. */
+      if(getDoc){
+        const ref=doc(cloud.db,"ledgers",cloud.user.uid);
+        const cur=await getDoc(ref);
+        if(cur.exists()){
+          const curRev=cur.data().rev||0, base=(S.meta.baseRev||S.meta.rev||0);
+          if(curRev>base && cur.data().device!==devId()){
+            cloud.conflict="Your other device saved revision "+curRev+" while this one was on "+
+              base+". Nothing has been sent, so neither copy is lost. Export a backup from both, "+
+              "then keep working on one device only.";
+            paintSync();
+            toast("Not saved to the cloud — your other device is ahead. See Sync.");
+            return;
+          }
+        }
+      }
+      const next=(S.meta.rev||0)+1;
+      const payload={rev:next,device:devId(),
                      at:new Date().toISOString(),data:JSON.stringify(S)};
       await setDoc(doc(cloud.db,"ledgers",cloud.user.uid),payload);
+      S.meta.rev=next; S.meta.baseRev=next; S.meta.dirty=false;
+      persist();
       cloud.last={device:payload.device,at:payload.at};
-      cloud.err=""; paintSync();
+      cloud.err=""; cloud.conflict=""; paintSync();
     }catch(e){
       cloud.err="Could not save to the cloud: "+(e.code||e.message||"unknown");
       paintSync();
@@ -740,14 +817,24 @@ function paintSync(){
       '<button class="btn" id="syIn">Sign in</button><div style="height:9px"></div>'+
       '<button class="btn ghost" id="syUp">Create an account</button><div style="height:9px"></div>'+
       '<button class="btn ghost" id="syCfg2">Change the settings</button>';
+    /* item 2: paintSync rebuilds this box, so put back what was typed */
+    if(cloud.form){
+      document.getElementById("syEmail").value=cloud.form.em||"";
+      if(cloud.form.pw){
+        const p=document.getElementById("syPass");
+        p.value=cloud.form.pw; cloud.form.pw=null;
+        if(cloud.err){ p.focus(); p.select(); }
+      }
+    }
     const go=async function(make){
       const em=document.getElementById("syEmail").value.trim();
       const pw=document.getElementById("syPass").value;
+      cloud.form={em:em,pw:pw};
       if(!em||!pw){ cloud.err="Enter both the email and the password."; paintSync(); return; }
       try{
         if(make) await cloud.authmod.createUserWithEmailAndPassword(cloud.auth,em,pw);
         else await cloud.authmod.signInWithEmailAndPassword(cloud.auth,em,pw);
-        cloud.err="";
+        cloud.err=""; cloud.form=null;
       }catch(x){
         const m={"auth/invalid-credential":"Wrong email or password.",
                  "auth/invalid-email":"That email does not look right.",
@@ -768,12 +855,47 @@ function paintSync(){
       {day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"}); }catch(e){}
   }
   const mine=cloud.last&&cloud.last.device===devId();
-  box.innerHTML='<span class="pill good">Syncing</span>'+
+  box.innerHTML=(cloud.conflict?'<span class="pill" style="background:var(--out);color:#fff">Not syncing</span>'
+                               :'<span class="pill good">Syncing</span>')+
     '<div class="note">'+esc(cloud.user.email)+'</div>'+
     '<div class="note">Last change '+esc(when)+
       (cloud.last?(mine?" from this device":" from your other device"):"")+'</div>'+
+    (cloud.conflict?'<div class="note" style="color:var(--out);font-weight:600">'+esc(cloud.conflict)+'</div>'+
+       '<div style="height:9px"></div><button class="btn" id="syBk">Export a backup first</button>'+
+       '<div style="height:9px"></div>'+
+       (cloud.theirs?'<button class="btn ghost" id="syTheirs">Replace this device with the other copy</button>'+
+         '<div style="height:9px"></div><button class="btn ghost" id="syMine">Keep this device and overwrite the other</button>'+
+         '<div style="height:9px"></div>':"")
+      :"")+
     (cloud.err?'<div class="note" style="color:var(--out)">'+esc(cloud.err)+'</div>':"")+
     '<div style="height:11px"></div><button class="btn ghost" id="syOut">Sign out of sync</button>';
+  const bk=document.getElementById("syBk");
+  if(bk) bk.onclick=function(){ exportJson(); };
+  const th=document.getElementById("syTheirs");
+  if(th) th.onclick=function(){
+    const d=cloud.theirs; if(!d) return;
+    try{ snapshot("your copy, replaced by the other device",JSON.stringify(S),(S.entries||[]).length); }catch(e){}
+    try{
+      const inc=JSON.parse(d.data);
+      cloud.applying=true;
+      S=inc; if(!S.meta) S.meta={};
+      S.meta.rev=d.rev; S.meta.baseRev=d.rev; S.meta.dirty=false;
+      persist(); cloud.applying=false;
+      cloud.conflict=""; cloud.theirs=null;
+      repaint(); paintSync(); toast("This device now matches your other one");
+    }catch(e){ cloud.applying=false; toast("That copy could not be read"); }
+  };
+  const mn=document.getElementById("syMine");
+  if(mn) mn.onclick=function(){
+    const d=cloud.theirs; if(!d) return;
+    try{ let n=0; try{ n=(JSON.parse(d.data).entries||[]).length; }catch(e2){}
+      snapshot("the other device's copy, before you overwrote it",d.data,n); }catch(e){}
+    if(!S.meta) S.meta={};
+    S.meta.rev=d.rev; S.meta.baseRev=d.rev;
+    cloud.conflict=""; cloud.theirs=null;
+    persist(); save(); paintSync();
+    toast("Your other device will be overwritten with this copy");
+  };
   document.getElementById("syOut").onclick=async function(){
     if(cloud.unsub){cloud.unsub();cloud.unsub=null;}
     try{ await cloud.authmod.signOut(cloud.auth); }catch(e){}
@@ -970,6 +1092,25 @@ function setDir(d){
   showSaleFields();
   eqLine();
 }
+/* --- item 16: duplicate guard on the contra side of a transfer --- */
+var dupArmed="";
+function dupKey(a,b,amt,date){
+  var p=[a,b].sort();
+  return p[0]+"|"+p[1]+"|"+(Math.round(amt*100)/100)+"|"+date;
+}
+function findDuplicate(a,b,amt,date){
+  var t=Date.parse(date); if(isNaN(t)) return null;
+  var pair=[a,b].sort().join("|");
+  for(var i=S.entries.length-1;i>=0;i--){
+    var x=S.entries[i];
+    if(Math.abs((x.amount||0)-amt)>0.005) continue;
+    if([x.debit,x.credit].sort().join("|")!==pair) continue;
+    var d=Date.parse(x.date); if(isNaN(d)) continue;
+    if(Math.abs(d-t)>3*864e5) continue;
+    return x;
+  }
+  return null;
+}
 function saveEntry(linked){
   const err=document.getElementById("addErr");
   const from=document.getElementById("fFrom").value;
@@ -988,7 +1129,19 @@ function saveEntry(linked){
   const nt=document.getElementById("fNote").value.trim();
   const d1=dir==="out"?other:from, c1=dir==="out"?from:other;
   const dsc=desc||"(no description)";
-  const sale=saleShape();
+  const _sale=saleShape();
+  const dupe=findDuplicate(d1,c1,amt,date) ||
+             (_sale.on?findDuplicate(d1,c1,Math.min(amt,_sale.cost),date):null);
+  if(dupe && dupArmed!==dupKey(d1,c1,amt,date)){
+    dupArmed=dupKey(d1,c1,amt,date);
+    setTimeout(function(){ dupArmed=""; },120000);
+    err.textContent="Already recorded: "+fmtS(dupe.amount)+" between "+dupe.debit+
+      " and "+dupe.credit+" on "+dShort(dupe.date)+
+      ". In double entry both sides are already posted. Press Save again if this is a second, separate transaction.";
+    err.classList.add("on");
+    return;
+  }
+  const sale=_sale;
   if(sale.on){
     if(sale.cost>amt+0.5 && sale.cost-amt>amt*20){
       err.textContent="That cost looks far larger than the amount received. Check the figures.";
@@ -1003,6 +1156,7 @@ function saveEntry(linked){
         amount:Math.abs(g),note:nt,link:lk});
     }
     S.sinceBackup=(S.sinceBackup||0)+1;
+    dupArmed="";
     save();
     document.getElementById("fCost").value="";
     document.getElementById("fAmt").value="";
@@ -1020,6 +1174,7 @@ function saveEntry(linked){
     S.entries.push({id:S.seq++,date,desc:dsc,debit:d1,credit:c1,amount:amt,note:nt});
   }
   S.sinceBackup=(S.sinceBackup||0)+1;
+  dupArmed="";
   save();
   document.getElementById("fDisc").value="";
   document.getElementById("fAmt").value="";
@@ -1115,8 +1270,10 @@ function editEntry(id){
   const e=S.entries.find(x=>x.id===id); if(!e) return;
   openSheet(
    '<h2>Edit entry</h2><div class="err" id="eErr"></div>'+
-   (e.link?'<div class="note" style="margin:-6px 0 12px">This is one of two lines posted together '+
-     'for a discount. Deleting it removes both.</div>':"")+
+   (e.link?'<div class="note" style="margin:-6px 0 12px">One of two lines posted together for a '+
+     (/ — (profit|loss)$/.test(e.desc)||S.entries.some(function(x){return x.link===e.link&&/ — (profit|loss)$/.test(x.desc);})?'sale':'discount')+
+     '. The date, description and note apply to both lines. The amount and the two accounts '+
+     'belong to this line alone. Deleting removes both.</div>':"")+
    '<div class="field"><label>Date</label><input type="date" id="eDate" value="'+esc(e.date)+'"></div>'+
    '<div class="field"><label>Description</label><input id="eDesc" value="'+esc(e.desc)+'"></div>'+
    '<div class="field"><label>Debit — what came in</label><select id="eDr"></select></div>'+
@@ -1136,9 +1293,23 @@ function editEntry(id){
     if(!dr||!cr||dr===cr||!(am>0)||!dt){
       er.textContent="Check the two accounts are different, the amount is above zero and the date is set.";
       er.classList.add("on");return;}
-    e.date=dt;e.desc=document.getElementById("eDesc").value.trim()||"(no description)";
-    e.debit=dr;e.credit=cr;e.amount=am;e.note=document.getElementById("eNote").value.trim();
-    save();closeSheet();toast("Updated");repaint();
+    /* item 1: shared fields propagate across a linked pair; per-line fields do not */
+    const nDesc=document.getElementById("eDesc").value.trim()||"(no description)";
+    const nNote=document.getElementById("eNote").value.trim();
+    const stem=function(t){return t.replace(/ — (profit|loss|discount)$/,"");};
+    const sibs=e.link?S.entries.filter(function(x){return x.link===e.link;}):[e];
+    const moved=(e.debit!==dr||e.credit!==cr||Math.abs((e.amount||0)-am)>0.005);
+    sibs.forEach(function(x){
+      const suf=((x.desc||"").match(/ — (profit|loss|discount)$/)||[""])[0];
+      x.date=dt; x.desc=stem(nDesc)+suf; x.note=nNote;
+    });
+    e.debit=dr;e.credit=cr;e.amount=am;
+    save();closeSheet();
+    toast(sibs.length>1
+      ? (moved?"Updated. Date and description applied to both lines; amount and accounts changed on this line only."
+              :"Updated — both lines")
+      : "Updated");
+    repaint();
   };
   document.getElementById("eCopy").onclick=()=>{
     closeSheet(); show("add");
@@ -1580,17 +1751,52 @@ function parseCsv(text){
   if(cur||row.length){row.push(cur);out.push(row);}
   return out.filter(r=>r.length>1);
 }
+var restoreArmed="";
 function importFile(f){
   const fr=new FileReader();
   fr.onload=async ()=>{
-    await snapshot("before restore");
     try{
       if(f.name.endsWith(".json")){
         const j=JSON.parse(fr.result);
         if(!j.accounts||!j.entries) throw 0;
+        /* item 20: a restore replaces everything, and with sync on it replaces the cloud
+           copy and every other device too. Arm once, and take a real file copy first. */
+        const have=(S.entries||[]).length;
+        const synced=!!(cloud&&cloud.ready&&cloud.user);
+        const fid=f.name+"|"+f.size+"|"+(f.lastModified||0);
+        if(have && restoreArmed!==fid){
+          restoreArmed=fid;
+          try{ dl("ledger-safety-copy-"+today()+".json",JSON.stringify(S),"application/json"); }catch(e){}
+          setTimeout(function(){ restoreArmed=""; },60000);
+          toast("Stop. This replaces all "+have+" entries"+
+                (synced?" here and on your other devices":"")+
+                ". A safety copy has been offered as a download — check it saved. "+
+                "A restore point is kept either way. Choose the same file again within a minute to go ahead.");
+          return;
+        }
+        restoreArmed="";
+        /* Find out where the cloud stands BEFORE swapping S, so nothing can arrive
+           mid-await and be adopted over the restore. */
+        let cloudRev=null, live=!!(cloud&&cloud.ready&&cloud.user&&cloud.fs&&cloud.fs.getDoc);
+        if(live){
+          try{
+            const cur=await cloud.fs.getDoc(cloud.fs.doc(cloud.db,"ledgers",cloud.user.uid));
+            cloudRev=cur.exists()?(cur.data().rev||0):0;
+          }catch(e){ cloudRev=null; }
+        }
+        if(live && cloudRev===null){
+          toast("Could not reach the cloud, so the restore was not applied. "+
+                "Nothing has changed. Try again when you are online.");
+          return;
+        }
+        await snapshot("before restore",JSON.stringify(S),(S.entries||[]).length);
         S=j; if(!S.seq) S.seq=S.entries.length+1;
+        if(!S.meta) S.meta={};
+        if(cloudRev!==null){ S.meta.rev=cloudRev; S.meta.baseRev=cloudRev; cloud.conflict=""; cloud.theirs=null; }
+        S.meta.dirty=true;
         save();repaint();toast("Backup restored");
       }else{
+        await snapshot("before import",JSON.stringify(S),(S.entries||[]).length);
         const rows=parseCsv(fr.result); rows.shift();
         const known=new Set(S.accounts.map(a=>a.name));
         let n=0, bad=0;
@@ -1613,6 +1819,11 @@ function importFile(f){
 async function paintSnaps(){
   const box=document.getElementById("snapBox"); if(!box) return;
   const list=await listSnapshots();
+  if(snapsBroken){
+    box.innerHTML='<div class="note" style="color:var(--out);font-weight:600">This browser is not '+
+      'keeping restore points. Export a backup before any restore — nothing is being held for you.</div>';
+    return;
+  }
   if(!list.length){box.innerHTML='<div class="note" style="margin-top:0">None yet. One is kept every time you back up.</div>';return;}
   box.innerHTML=list.map((s2,i)=>'<button class="line snapRow" data-i="'+i+'" style="width:100%;padding:8px 0">'+
     '<span class="lbl" style="text-align:left">'+esc(s2.at.slice(0,10))+' · '+esc(s2.reason)+
@@ -1623,8 +1834,22 @@ async function paintSnaps(){
       ', '+s2.entries+' entries. Anything entered since will be lost.</div><div style="height:14px"></div>'+
       '<button class="btn warn" id="snapGo">Restore this version</button>');
     document.getElementById("snapGo").onclick=async ()=>{
-      await snapshot("before restore");
-      S=JSON.parse(s2.data); save(); closeSheet(); repaint(); toast("Restored");
+      await snapshot("before restore",JSON.stringify(S),(S.entries||[]).length);
+      let cRev=null, lv=!!(cloud&&cloud.ready&&cloud.user&&cloud.fs&&cloud.fs.getDoc);
+      if(lv){
+        try{
+          const cur=await cloud.fs.getDoc(cloud.fs.doc(cloud.db,"ledgers",cloud.user.uid));
+          cRev=cur.exists()?(cur.data().rev||0):0;
+        }catch(e){ cRev=null; }
+        if(cRev===null){
+          toast("Could not reach the cloud, so nothing was restored. Try again when you are online.");
+          return;
+        }
+      }
+      S=JSON.parse(s2.data); if(!S.meta) S.meta={};
+      if(cRev!==null){ S.meta.rev=cRev; S.meta.baseRev=cRev; cloud.conflict=""; cloud.theirs=null; }
+      S.meta.dirty=true;
+      save(); closeSheet(); repaint(); toast("Restored");
     };
   });
 }
@@ -1851,8 +2076,12 @@ async function init(){
   document.getElementById("nagGo").onclick=()=>{show("dat");exportJson();};
   if(getCfg()) cloudInit();
   if(!S.entries.length && S.accounts.length<45)
-    setTimeout(()=>{show("dat");
-      toast("New here? Restore your backup under Data.");},700);
+    setTimeout(()=>{
+      /* item 20: on a device that is set up to sync, signing in brings the books down.
+         Suggesting a restore here is what puts a good ledger at risk. */
+      if(getCfg()){ toast("Signing in will bring your books down to this device."); }
+      else { show("dat"); toast("New here? Restore your backup under Data."); }
+    },700);
   paintNag();
 }
 init();
