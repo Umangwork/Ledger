@@ -163,6 +163,22 @@ hr{border:0;border-top:1px solid var(--rule);margin:15px 0}
 .pitem.sel{color:var(--teal);font-weight:620}
 .pitem b{font-weight:700;color:var(--teal)}
 .pnone{padding:34px 20px;text-align:center;color:var(--mute);font-size:14px}
+#printArea{display:none}
+@media print{
+  body.stmt-print>*{display:none!important}
+  body.stmt-print #printArea{display:block!important;padding:0;color:#000;font:12px/1.45 ui-sans-serif,system-ui,sans-serif}
+  body.stmt-print #printArea h1{font-size:17px;margin:0 0 2px}
+  #printArea .sub{font-size:11px;color:#444;margin-bottom:12px}
+  #printArea table{width:100%;border-collapse:collapse}
+  #printArea thead{display:table-header-group}
+  #printArea tr{page-break-inside:avoid}
+  #printArea th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.4px;
+    border-bottom:1px solid #000;padding:5px 6px}
+  #printArea td{padding:4px 6px;border-bottom:1px solid #ddd;vertical-align:top}
+  #printArea td.n,#printArea th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  #printArea tfoot td{border-top:1px solid #000;border-bottom:none;font-weight:700}
+  #printArea .foot{margin-top:14px;font-size:10px;color:#555}
+}
 </style>
 </head>
 <body>
@@ -259,13 +275,32 @@ hr{border:0;border-top:1px solid var(--rule);margin:15px 0}
   <section class="view" id="v-jrn">
     <div class="card">
       <div class="field"><label for="jAcct">Account</label><select id="jAcct"></select></div>
-      <div class="field"><label for="jFind">Find in description or note</label>
+      <div class="field"><label for="jFind">Find — description, note, account or amount</label>
         <input id="jFind" placeholder="haircut"></div>
       <div class="row2" style="margin-bottom:0">
         <div class="field" style="margin-bottom:0"><label for="jFrom">From</label>
           <input id="jFrom" type="date"></div>
         <div class="field" style="margin-bottom:0"><label for="jTo">To</label>
           <input id="jTo" type="date"></div>
+      </div>
+      <div class="row2" style="margin-top:11px;margin-bottom:0">
+        <div class="field" style="margin-bottom:0"><label for="jType">Kind</label>
+          <select id="jType">
+            <option value="">Everything</option>
+            <option value="spend">Spending</option>
+            <option value="income">Income</option>
+            <option value="transfer">Transfers</option>
+            <option value="invest">Investments</option>
+            <option value="linked">Discount and profit lines</option>
+            <option value="other">Anything else</option>
+          </select></div>
+        <div class="field" style="margin-bottom:0"><label for="jSort">Order</label>
+          <select id="jSort">
+            <option value="new">Newest first</option>
+            <option value="old">Oldest first</option>
+            <option value="big">Largest amount</option>
+            <option value="small">Smallest amount</option>
+          </select></div>
       </div>
     </div>
     <div class="card">
@@ -281,6 +316,14 @@ hr{border:0;border-top:1px solid var(--rule);margin:15px 0}
     </div>
     <div class="card" id="lSummary"></div>
     <div class="card">
+      <h2>Entries recorded</h2>
+      <div class="field"><label for="lUpto">This account is entered up to</label>
+        <input id="lUpto" type="date"></div>
+      <div id="lUptoNote" class="note" style="margin-top:0"></div>
+      <div style="height:11px"></div>
+      <div id="lAgeing"></div>
+    </div>
+    <div class="card">
       <h2>Reconcile</h2>
       <div class="field"><label for="lActual">Balance shown in the app or statement</label>
         <input id="lActual" class="num" inputmode="decimal" placeholder="0"></div>
@@ -289,6 +332,13 @@ hr{border:0;border-top:1px solid var(--rule);margin:15px 0}
     <div class="card">
       <h2>Every entry, both sides</h2>
       <div id="lList"></div>
+      <div style="height:11px"></div>
+      <div class="row2">
+        <button class="btn ghost" id="lCsv">Download as CSV</button>
+        <button class="btn ghost" id="lPdf">Save as PDF</button>
+      </div>
+      <div class="note">The CSV opens in Excel. Save as PDF uses your browser's print dialog —
+        choose "Save as PDF" as the destination.</div>
     </div>
   </section>
 
@@ -317,11 +367,18 @@ hr{border:0;border-top:1px solid var(--rule);margin:15px 0}
       <div style="height:11px"></div>
       <button class="btn" id="dExpJson">Back up to Drive</button>
       <div style="height:9px"></div>
+      <button class="btn ghost" id="dExpCsv">Entries as CSV</button>
+      <div style="height:9px"></div>
       <div class="row2">
-        <button class="btn ghost" id="dExpCsv">Entries as CSV</button>
-        <button class="btn ghost" id="dImp">Restore</button>
+        <button class="btn ghost" id="dImp">Restore a backup</button>
+        <button class="btn ghost" id="dImpCsv">Add entries from CSV</button>
       </div>
-      <input type="file" id="dFile" accept=".json,.csv" style="display:none">
+      <div class="note" style="margin-top:9px"><strong>Restore a backup</strong> replaces everything
+        you have with the contents of a .json file. <strong>Add entries from CSV</strong> appends
+        rows to what is already there and changes nothing else. Confusing the two is how books get
+        wiped or doubled.</div>
+      <input type="file" id="dFile" accept=".json" style="display:none">
+      <input type="file" id="dFileCsv" accept=".csv" style="display:none">
       <div class="note">On Android this opens the share sheet — choose Drive. Everything else here
         is a copy inside the phone, so the Drive file is the only one that survives losing it.</div>
     </div>
@@ -481,6 +538,7 @@ async function load(){
   if(!S.seq) S.seq=(S.entries||[]).length+1;
   if(!S.templates) S.templates=TEMPLATES.map(t=>({name:t[0],dir:t[1],other:t[2],from:t[3],amount:t[4]}));
   if(!S.recon) S.recon={};
+  if(!S.enteredTo) S.enteredTo={};
   if(S.sinceBackup==null) S.sinceBackup=0;
   if(!S.recent) S.recent=[];
   if(!S.meta) S.meta={rev:0};
@@ -494,7 +552,7 @@ function seed(){
        credit:e[3],amount:e[4],note:e[5]})),
      lastBackup:null,seq:SEEDED_ENTRIES.length+1,sinceBackup:0,recent:[],
      templates:TEMPLATES.map(t=>({name:t[0],dir:t[1],other:t[2],from:t[3],amount:t[4]})),
-     recon:{}};
+     recon:{},enteredTo:{}};
 }
 function migratePeople(){
   const old=S.accounts.filter(a=>/^(Receivable|Payable) - /.test(a.name));
@@ -526,6 +584,7 @@ function persist(){
   return ok;
 }
 function save(){
+  pickCache=null;
   if(!S.meta) S.meta={};
   if(!cloud.applying) S.meta.dirty=true;
   persist();
@@ -816,6 +875,7 @@ function paintSync(){
       (cloud.err?'<div class="note" style="color:var(--out);margin-top:0">'+esc(cloud.err)+'</div>':"")+
       '<button class="btn" id="syIn">Sign in</button><div style="height:9px"></div>'+
       '<button class="btn ghost" id="syUp">Create an account</button><div style="height:9px"></div>'+
+      '<button class="btn ghost" id="syReset">Forgotten your password?</button><div style="height:9px"></div>'+
       '<button class="btn ghost" id="syCfg2">Change the settings</button>';
     /* item 2: paintSync rebuilds this box, so put back what was typed */
     if(cloud.form){
@@ -842,6 +902,21 @@ function paintSync(){
                  "auth/weak-password":"The password needs at least 6 characters.",
                  "auth/operation-not-allowed":"Email sign-in is not switched on in Firebase yet."};
         cloud.err=m[x.code]||x.code||x.message; paintSync();
+      }
+    };
+    document.getElementById("syReset").onclick=async function(){
+      const em=document.getElementById("syEmail").value.trim();
+      if(!em){ cloud.err="Type your email first, then ask for the link."; paintSync(); return; }
+      cloud.form={em:em,pw:null};
+      try{
+        await cloud.authmod.sendPasswordResetEmail(cloud.auth,em);
+        cloud.err=""; paintSync();
+        toast("If that address has an account, a reset link is on its way. Check spam too.");
+      }catch(x){
+        /* Firebase deliberately hides whether an address exists; say the same either way. */
+        cloud.err=(x.code==="auth/invalid-email")?"That email does not look right."
+                 :"Could not send the link. Check the connection and try again.";
+        paintSync();
       }
     };
     document.getElementById("syIn").onclick=function(){go(false);};
@@ -964,6 +1039,7 @@ function syncPickers(){
   document.querySelectorAll("select[data-pk]").forEach(s2=>{ if(s2._btn) s2._btn._sync(); });
 }
 function openPicker(sel){
+  pickCache=null;
   pickSel=sel;
   document.getElementById("pq").value="";
   document.getElementById("pscrim").classList.add("on");
@@ -982,6 +1058,22 @@ function hl(txt,q){
   if(i<0) return esc(txt);
   return esc(txt.slice(0,i))+"<b>"+esc(txt.slice(i,i+q.length))+"</b>"+esc(txt.slice(i+q.length));
 }
+/* --- items 9 and 12: every balance and every used account in a single pass,
+       because calling balance() per row would be accounts x entries --- */
+var pickCache=null;
+function pickerFacts(){
+  if(pickCache) return pickCache;
+  const bal=Object.create(null), used=Object.create(null), side=Object.create(null);
+  S.accounts.forEach(function(a){ bal[a.name]=+a.opening||0; side[a.name]=a.side; });
+  S.entries.forEach(function(e){
+    if(side[e.debit]!==undefined){
+      bal[e.debit]+= (side[e.debit]==="Dr"? e.amount : -e.amount); used[e.debit]=1; }
+    if(side[e.credit]!==undefined){
+      bal[e.credit]+= (side[e.credit]==="Dr"? -e.amount : e.amount); used[e.credit]=1; }
+  });
+  pickCache={bal:bal, used:used};
+  return pickCache;
+}
 function drawPicker(q){
   if(!pickSel) return;
   const box=document.getElementById("plist");
@@ -992,18 +1084,37 @@ function drawPicker(q){
     const rec=(S.recent||[]).filter(n=>opts.some(o=>!o.disabled&&o.value===n));
     if(rec.length){
       h+='<div class="pgroup">Recently used</div>';
-      rec.forEach(n=>{h+='<button class="pitem'+(n===cur?" sel":"")+'" data-v="'+esc(n)+'">'+
-        esc(n)+"</button>"; shown++;});
+      const rf=pickerFacts();
+      rec.forEach(n=>{
+        const rb=rf.bal[n];
+        h+='<button class="pitem'+(n===cur?" sel":"")+'" data-v="'+esc(n)+'">'+esc(n)+
+          (rb===undefined?"":'<span class="num" style="float:right;font-size:12px;color:var(--mute);'+
+           'font-variant-numeric:tabular-nums">'+esc(fmtS(rb))+'</span>')+"</button>"; shown++;});
     }
   }
-  let group="", buf="";
-  const flush=()=>{ if(buf){ h+= (group?'<div class="pgroup">'+esc(group)+"</div>":"")+buf; buf=""; } };
+  const facts=pickerFacts();
+  let group="", buf=[];
+  const flush=()=>{
+    if(buf.length){
+      /* item 12: accounts you actually use sit above the dormant ones */
+      buf.sort(function(x,y){ return (y.u?1:0)-(x.u?1:0); });
+      h+= (group?'<div class="pgroup">'+esc(group)+"</div>":"")+buf.map(function(b){return b.h;}).join("");
+      buf=[];
+    }
+  };
   opts.forEach(o=>{
     if(o.disabled){ flush(); group=o.text.replace(/^—\s*|\s*—$/g,""); return; }
     const t=o.value||o.text;
     if(q && !t.toLowerCase().includes(q.toLowerCase())) return;
-    buf+='<button class="pitem'+(o.value===cur?" sel":"")+'" data-v="'+esc(o.value)+'">'+
-      hl(t,q)+"</button>"; shown++;
+    const b=facts.bal[o.value];
+    /* item 9: the balance, so you need not leave the screen to check it */
+    const tag = (b===undefined) ? "" :
+      '<span class="num" style="float:right;font-size:12px;color:var(--mute);font-variant-numeric:tabular-nums">'+
+      esc(fmtS(b))+'</span>';
+    buf.push({u:!!facts.used[o.value],
+      h:'<button class="pitem'+(o.value===cur?" sel":"")+'" data-v="'+esc(o.value)+'">'+
+        hl(t,q)+tag+"</button>"});
+    shown++;
   });
   flush();
   box.innerHTML = shown ? h : '<div class="pnone">Nothing matches. Try part of a name, '+
@@ -1334,28 +1445,159 @@ function editEntry(id){
 }
 
 /* ---------- journal ---------- */
+/* --- item 7: what kind of entry this is, read off the two accounts --- */
+var linkFirst=null;
+function buildLinkFirst(){
+  linkFirst=Object.create(null);
+  S.entries.forEach(function(e){
+    if(!e.link) return;
+    if(linkFirst[e.link]===undefined || e.id<linkFirst[e.link]) linkFirst[e.link]=e.id;
+  });
+  return linkFirst;
+}
+function entryKind(e){
+  /* the primary line is the first posted in its pair; anything after it is the
+     discount or profit leg. Structural, so a typed description cannot fake it. */
+  if(e.link){
+    const lf=linkFirst||buildLinkFirst();
+    if(lf[e.link]!==undefined && e.id!==lf[e.link]) return "linked";
+  }
+  const gd=(acct(e.debit)||{}).group, gc=(acct(e.credit)||{}).group;
+  const cash=function(g){ return g==="Bank & cash"||g==="Credit cards"; };
+  if(gd==="Expense") return "spend";
+  if(gc==="Income") return "income";
+  if(cash(gd)&&cash(gc)) return "transfer";
+  if(gd==="Investments (cost)"||gc==="Investments (cost)"||gd==="Broker"||gc==="Broker") return "invest";
+  return "other";
+}
 function paintJournal(){
   const a=document.getElementById("jAcct").value;
   const q=document.getElementById("jFind").value.trim().toLowerCase();
-  let list=S.entries.slice().sort((x,y)=>x.date<y.date?1:x.date>y.date?-1:y.id-x.id);
+  buildLinkFirst();
+  const srt=(document.getElementById("jSort")||{}).value||"new";
+  const kind=(document.getElementById("jType")||{}).value||"";
+  let list=S.entries.slice();
   const f=document.getElementById("jFrom").value, tt=document.getElementById("jTo").value;
   if(a) list=list.filter(e=>e.debit===a||e.credit===a);
-  if(q) list=list.filter(e=>((e.desc||"")+" "+(e.note||"")).toLowerCase().includes(q));
+  if(kind) list=list.filter(e=>entryKind(e)===kind);
+  if(q){
+    /* item 10: narration, note, either account name, and the amount */
+    /* the amount is searched only when the query is itself a number, so that
+       "card 1" stays a text search instead of matching every amount with a 1 in it */
+    const qnum=q.replace(/^[\u20B9rs.\s]+/i,"").trim();
+    const digits=qnum.replace(/[^0-9.]/g,"");
+    const numericQ=/^[0-9][0-9,. ]*$/.test(qnum) && digits.length>0;
+    const qn=numericQ?parseFloat(digits):NaN;
+    list=list.filter(function(e){
+      const hay=((e.desc||"")+" "+(e.note||"")+" "+(e.debit||"")+" "+(e.credit||"")).toLowerCase();
+      if(hay.indexOf(q)>-1) return true;
+      if(numericQ && !isNaN(qn)){
+        if(Math.abs((e.amount||0)-qn)<0.005) return true;
+        if(digits.length>=3 && String(e.amount||0).indexOf(digits)>-1) return true;
+      }
+      return false;
+    });
+  }
   if(f) list=list.filter(e=>e.date>=f);
   if(tt) list=list.filter(e=>e.date<=tt);
+  /* item 11: order is a choice, not a fixed newest-first */
+  list.sort(srt==="old" ? function(x,y){return x.date<y.date?-1:x.date>y.date?1:x.id-y.id;}
+          : srt==="big" ? function(x,y){return (y.amount||0)-(x.amount||0);}
+          : srt==="small"? function(x,y){return (x.amount||0)-(y.amount||0);}
+          : function(x,y){return x.date<y.date?1:x.date>y.date?-1:y.id-x.id;});
   const sum=list.reduce((s,e)=>s+e.amount,0);
   document.getElementById("jCount").textContent=
     list.length+(list.length===1?" entry":" entries")+(list.length?"  ·  "+fmtS(sum):"");
   const box=document.getElementById("jList");
   const cap=300, shown=list.slice(0,cap);
   box.innerHTML = list.length ? shown.map(e=>entRow(e,a)).join("")+
-      (list.length>cap?'<div class="note" style="text-align:center">Showing the latest '+cap+
-       " of "+list.length+". Narrow it with a date range.</div>":"")
-    : '<div class="empty">Nothing matches. Clear the account or the search text.</div>';
+      (list.length>cap?'<div class="note" style="text-align:center">Showing '+cap+
+       " of "+list.length+" in this order. Narrow it with a date range or a kind.</div>":"")
+    : '<div class="empty">Nothing matches. Clear the account, the kind, the dates '+
+      'or the search text.</div>';
   bindRows(box);
 }
 
 /* ---------- ledger ---------- */
+/* --- item 5: a statement for one account, as a file --- */
+function fmtX(v){
+  const a=Math.abs(+v||0).toFixed(2);
+  const neg=(v<0 && parseFloat(a)!==0);
+  const p=a.split("."), w=p[0];
+  let out="", c=0;
+  for(let i=w.length-1;i>=0;i--){ out=w[i]+out; c++;
+    if(i>0 && ((c===3) || (c>3 && (c-3)%2===0))) out=","+out; }
+  return (neg?"-":"")+out+"."+p[1];
+}
+function stmtRows(n){
+  const a=acct(n)||{opening:0,side:"Dr"};
+  const drSide=(a.side!=="Cr");
+  let run=+a.opening||0;
+  const rows=entriesFor(n).map(function(e){
+    const isDr=e.debit===n, isCr=e.credit===n;
+    /* two independent tests, as balance() does, so a self-cancelling entry nets
+       to zero instead of moving the balance by its full amount. A credit-side
+       account (cards, income, equity) moves the opposite way. */
+    let mv=0;
+    if(isDr) mv += drSide? e.amount : -e.amount;
+    if(isCr) mv += drSide? -e.amount : e.amount;
+    run += mv;
+    return {date:e.date, desc:e.desc||"", other:isDr?e.credit:e.debit,
+            dr:isDr?e.amount:null, cr:isCr?e.amount:null, bal:run, note:e.note||""};
+  });
+  return {opening:(+a.opening||0), rows:rows, closing:run};
+}
+function stmtCsv(){
+  const n=document.getElementById("lAcct").value;
+  if(!n){ toast("Pick an account first"); return; }
+  const st=stmtRows(n);
+  const out=[["Statement",n],["Generated",today()],[],
+             ["date","description","other account","debit","credit","balance","note"],
+             ["","Opening balance","","","",st.opening,""]];
+  st.rows.forEach(function(r){
+    out.push([r.date,r.desc,r.other,r.dr==null?"":r.dr,r.cr==null?"":r.cr,r.bal,r.note]);
+  });
+  out.push(["","Closing balance","","","",st.closing,""]);
+  dl("ledger-"+n.replace(/[^A-Za-z0-9]+/g,"-").toLowerCase()+"-"+today()+".csv",
+     out.map(function(r){return r.map(csvCell).join(",");}).join("\n"),"text/csv");
+  toast("Statement downloaded");
+}
+function stmtPdf(){
+  const n=document.getElementById("lAcct").value;
+  if(!n){ toast("Pick an account first"); return; }
+  const st=stmtRows(n);
+  const span=st.rows.length
+    ? esc(dShort(st.rows[0].date))+" to "+esc(dShort(st.rows[st.rows.length-1].date))
+    : "no entries";
+  let h='<h1>'+esc(n)+'</h1><div class="sub">'+st.rows.length+' entries · '+span+
+        ' · produced '+esc(dShort(today()))+'</div><table><thead><tr>'+
+        '<th>Date</th><th>Description</th><th>Other account</th>'+
+        '<th class="n">Debit (Rs.)</th><th class="n">Credit (Rs.)</th>'+
+        '<th class="n">Balance (Rs.)</th></tr></thead><tbody>'+
+        '<tr><td></td><td><em>Opening balance</em></td><td></td><td class="n"></td>'+
+        '<td class="n"></td><td class="n">'+esc(fmtX(st.opening))+'</td></tr>';
+  st.rows.forEach(function(r){
+    h+='<tr><td>'+esc(dShort(r.date))+'</td><td>'+esc(r.desc)+
+       (r.note?'<br><span style="color:#666;font-size:10.5px">'+esc(r.note)+'</span>':"")+
+       '</td><td>'+esc(r.other||"")+'</td><td class="n">'+(r.dr==null?"":esc(fmtX(r.dr)))+
+       '</td><td class="n">'+(r.cr==null?"":esc(fmtX(r.cr)))+
+       '</td><td class="n">'+esc(fmtX(r.bal))+'</td></tr>';
+  });
+  h+='</tbody><tfoot><tr><td></td><td>Closing balance</td><td></td><td class="n"></td>'+
+     '<td class="n"></td><td class="n">'+esc(fmtX(st.closing))+'</td></tr></tfoot></table>'+
+     '<div class="foot">Produced from your own books on '+esc(dShort(today()))+'.</div>';
+  const pa=document.getElementById("printArea");
+  pa.innerHTML=h;
+  document.body.classList.add("stmt-print");
+  /* onafterprint, not a timer: window.print() returns immediately on iOS, and
+     changing paper size in the dialog re-reads the DOM */
+  const tidy=function(){ document.body.classList.remove("stmt-print"); window.onafterprint=null; };
+  window.onafterprint=tidy;
+  try{ window.print(); }catch(e){ tidy(); }
+  /* unconditional: the property exists everywhere, the event does not always fire,
+     and tidy() is idempotent */
+  setTimeout(tidy,60000);
+}
 function paintLedger(){
   const n=document.getElementById("lAcct").value;
   if(!n){document.getElementById("lSummary").innerHTML="";return;}
@@ -1373,10 +1615,15 @@ function paintLedger(){
     d.innerHTML='<div class="line tot"><span class="lbl">Difference</span><span class="num">'+
       fmtS(diff)+'</span></div><div style="margin-top:8px"><span class="pill '+
       (Math.abs(diff)<0.5?"good":"bad")+'">'+(Math.abs(diff)<0.5?"Matches":"Something is missing")+'</span></div>';}
+  paintEnteredTo(n);
   let run=a.opening;
   const box=document.getElementById("lList");
   box.innerHTML = list.length ? list.map(e=>{
-    const mv = e.debit===n ? (a.side==="Dr"?e.amount:-e.amount) : (a.side==="Dr"?-e.amount:e.amount);
+    /* two independent tests, matching balance() and the printed statement, so an
+       entry with this account on both sides nets to zero on screen as well */
+    let mv=0;
+    if(e.debit===n)  mv += (a.side==="Dr"? e.amount : -e.amount);
+    if(e.credit===n) mv += (a.side==="Dr"? -e.amount : e.amount);
     run+=mv;
     return '<button class="ent" data-id="'+e.id+'"><span class="d">'+esc(dShort(e.date))+
       '</span><span class="m"><b>'+esc(e.desc)+'</b><span>'+
@@ -1386,6 +1633,34 @@ function paintLedger(){
       fmtS(run)+'</span></span></button>';
   }).join("") : '<div class="empty">No entries touch this account yet.</div>';
   bindRows(box);
+}
+/* --- item 15: how far each account has been entered, as a date that visibly ages --- */
+function lagDays(d){ if(!d) return null; return Math.round((Date.parse(today())-Date.parse(d))/864e5); }
+function paintEnteredTo(n){
+  const up=document.getElementById("lUpto"); if(!up) return;
+  const v=(S.enteredTo||{})[n]||"";
+  up.value=v;
+  const lag=lagDays(v);
+  const note=document.getElementById("lUptoNote");
+  note.textContent = !v ? "Not set. Put the date you have recorded this account up to."
+    : lag<=0 ? "Up to date."
+    : lag===1 ? "One day behind."
+    : lag+" days behind.";
+  note.style.color = (!v||lag>13) ? "var(--out)" : (lag>6 ? "var(--ink-2)" : "var(--mute)");
+  const rows=S.accounts.filter(function(a){
+      return ["Bank & cash","Credit cards","Broker"].includes(a.group); })
+    .map(function(a){ return {name:a.name, d:(S.enteredTo||{})[a.name]||"", lag:lagDays((S.enteredTo||{})[a.name]||"")}; })
+    .sort(function(x,y){ const lx=x.lag==null?99999:x.lag, ly=y.lag==null?99999:y.lag; return ly-lx; });
+  document.getElementById("lAgeing").innerHTML=
+    '<div style="font-size:12px;color:var(--mute);font-weight:600;margin-bottom:6px">'+
+    'Bank, card and broker accounts</div>'+
+    rows.map(function(r){
+      const col = r.lag==null?"var(--out)" : r.lag>13?"var(--out)" : r.lag>6?"var(--ink-2)":"var(--in)";
+      const txt = r.lag==null?"not set" : r.lag<=0?"up to date" : r.lag+"d behind";
+      return '<div class="line"><span class="lbl">'+esc(r.name)+
+        '</span><span class="num" style="font-size:12.5px;color:'+col+'">'+
+        (r.d?esc(dShort(r.d))+" · ":"")+txt+'</span></div>';
+    }).join("");
 }
 function line(l,v,cls){
   return '<div class="line '+(cls||"")+'"><span class="lbl">'+esc(l)+
@@ -1518,24 +1793,44 @@ function repTrend(){
 function reconAccts(){
   return S.accounts.filter(a=>["Bank & cash","Credit cards","Broker"].includes(a.group));
 }
+/* --- item 13: a figure typed a fortnight ago is not a current reconciliation --- */
+const RECON_STALE_DAYS=7;
+function reconVal(name){
+  const r=(S.recon||{})[name];
+  if(r==null||r==="") return null;
+  if(typeof r==="object") return {v:+r.v, at:r.at||null};
+  return {v:+r, at:null};            /* figures typed before this build carry no date */
+}
+function reconStale(rec){
+  if(!rec) return false;
+  if(!rec.at) return true;           /* undated means we cannot vouch for it */
+  return Math.round((Date.parse(today())-Date.parse(rec.at))/864e5) > RECON_STALE_DAYS;
+}
 function repRecon(){
   let h='<div class="card"><h2>Check every balance</h2>'+
     '<div class="note" style="margin-top:0">Type what each app shows. Anything that does not '+
     'match is an entry you have missed.</div><div style="height:12px"></div>';
-  let last=null, bad=0, done=0;
+  let last=null, bad=0, done=0, stales=0;
   reconAccts().forEach((a,i)=>{
     if(a.group!==last){h+='<div style="margin:14px 0 6px;font-size:12px;color:var(--mute);font-weight:600">'+
       esc(a.group)+"</div>";last=a.group;}
-    const bk=balance(a.name), r=S.recon[a.name];
-    const has=r!=null&&r!=="";
-    const diff=has?(+r)-bk:0;
+    const bk=balance(a.name), rec=reconVal(a.name);
+    const stale=reconStale(rec);
+    const has=!!rec && !stale;
+    const r=rec?rec.v:"";
+    const diff=has?rec.v-bk:0;
     if(has){done++; if(Math.abs(diff)>0.5) bad++;}
+    if(rec&&stale) stales++;
     h+='<div style="display:flex;gap:9px;align-items:center;padding:5px 0">'+
        '<div style="flex:1;min-width:0"><div style="font-size:14px;overflow:hidden;'+
        'text-overflow:ellipsis;white-space:nowrap">'+esc(a.name)+'</div>'+
        '<div class="num" style="font-size:12px;color:var(--mute)">book '+fmtS(bk)+
        (has?'  ·  <span style="color:'+(Math.abs(diff)<0.5?"var(--in)":"var(--out)")+'">'+
-        (Math.abs(diff)<0.5?"matches":"out by "+fmtS(diff))+"</span>":"")+'</div></div>'+
+        (Math.abs(diff)<0.5?"matches":"out by "+fmtS(diff))+"</span>"+
+        (rec.at?'  ·  checked '+esc(dShort(rec.at)):"")
+        :(rec&&stale?'  ·  <span style="color:var(--out)">'+
+           (rec.at?"last checked "+esc(dShort(rec.at)):"typed before dates were kept")+
+           ", too old to rely on</span>":""))+'</div></div>'+
        '<input class="num rcIn" data-a="'+esc(a.name)+'" inputmode="decimal" '+
        'style="width:104px;padding:9px" placeholder="actual" value="'+(has?esc(r):"")+'">'+
        (has&&Math.abs(diff)>0.5
@@ -1544,7 +1839,10 @@ function repRecon(){
            'white-space:nowrap">Explain</button>'
          : '')+'</div>';
   });
-  h+='<hr><div class="line tot"><span class="lbl">'+done+' of '+reconAccts().length+
+  h+=(stales?'<div class="note" style="color:var(--out)">'+stales+
+       ' figure'+(stales===1?" is":"s are")+' older than '+RECON_STALE_DAYS+
+       ' days and no longer counted. Retype or clear them.</div>':"")+
+     '<hr><div class="line tot"><span class="lbl">'+done+' of '+reconAccts().length+
      ' checked</span><span>'+(bad?'<span class="pill bad">'+bad+' to investigate</span>':
      done?'<span class="pill good">all match</span>':'')+'</span></div>'+
      '<div style="height:10px"></div><button class="btn ghost" id="rcClear">Clear and start again</button></div>';
@@ -1553,7 +1851,8 @@ function repRecon(){
 function bindRecon(){
   document.querySelectorAll(".rcIn").forEach(i=>{
     i.onchange=()=>{const v=i.value.trim();
-      if(v==="") delete S.recon[i.dataset.a]; else S.recon[i.dataset.a]=parseFloat(v)||0;
+      if(v==="") delete S.recon[i.dataset.a];
+      else S.recon[i.dataset.a]={v:parseFloat(v)||0, at:today()};
       save();paintReports();};
   });
   document.getElementById("rcClear").onclick=()=>{S.recon={};save();paintReports();toast("Cleared");};
@@ -1752,11 +2051,20 @@ function parseCsv(text){
   return out.filter(r=>r.length>1);
 }
 var restoreArmed="";
-function importFile(f){
+function importFile(f,mode){
   const fr=new FileReader();
   fr.onload=async ()=>{
     try{
-      if(f.name.endsWith(".json")){
+      const isJson = mode ? (mode==="restore") : f.name.endsWith(".json");
+      if(mode==="restore" && f.name.endsWith(".csv")){
+        toast("That is a CSV of entries. Use \u201cAdd entries from CSV\u201d to append them.");
+        return;
+      }
+      if(mode==="add" && f.name.endsWith(".json")){
+        toast("That is a backup, not a CSV. Use \u201cRestore a backup\u201d if you mean to replace everything.");
+        return;
+      }
+      if(isJson){
         const j=JSON.parse(fr.result);
         if(!j.accounts||!j.entries) throw 0;
         /* item 20: a restore replaces everything, and with sync on it replaces the cloud
@@ -1931,6 +2239,7 @@ function accountSheet(name){
       S.entries.forEach(e=>{if(e.debit===name)e.debit=nn; if(e.credit===name)e.credit=nn;});
       S.templates.forEach(t=>{if(t.from===name)t.from=nn; if(t.other===name)t.other=nn;});
       if(S.recon[name]!=null){S.recon[nn]=S.recon[name];delete S.recon[name];}
+      if(S.enteredTo&&S.enteredTo[name]!=null){S.enteredTo[nn]=S.enteredTo[name];delete S.enteredTo[name];}
       a.name=nn;
     }
     const oi=document.getElementById("cOpen");
@@ -1941,6 +2250,7 @@ function accountSheet(name){
   if(del) del.onclick=()=>{
     S.accounts=S.accounts.filter(x=>x.name!==name);
     delete S.recon[name];
+    if(S.enteredTo) delete S.enteredTo[name];
     S.templates=S.templates.filter(t=>t.from!==name&&t.other!==name);
     save();closeSheet();toast("Account deleted");repaint();
   };
@@ -2050,9 +2360,21 @@ async function init(){
   document.getElementById("fSave2").onclick=()=>saveEntry(true);
   document.getElementById("jAcct").onchange=paintJournal;
   document.getElementById("jFind").oninput=paintJournal;
+  document.getElementById("jType").onchange=paintJournal;
+  document.getElementById("jSort").onchange=paintJournal;
   document.getElementById("jFrom").onchange=paintJournal;
   document.getElementById("jTo").onchange=paintJournal;
   document.getElementById("lAcct").onchange=()=>{document.getElementById("lActual").value="";paintLedger();};
+  document.getElementById("lCsv").onclick=stmtCsv;
+  document.getElementById("lPdf").onclick=stmtPdf;
+  document.getElementById("lUpto").onchange=function(){
+    const n=document.getElementById("lAcct").value; if(!n) return;
+    if(!S.enteredTo) S.enteredTo={};
+    const v=this.value;
+    if(v) S.enteredTo[n]=v; else delete S.enteredTo[n];
+    save(); paintEnteredTo(n);
+    toast(v?("Recorded up to "+dShort(v)):"Cleared");
+  };
   document.getElementById("lActual").oninput=paintLedger;
   document.querySelectorAll("#repSeg button").forEach(b=>b.onclick=()=>{
     curRep=b.dataset.r;
@@ -2063,7 +2385,9 @@ async function init(){
   document.getElementById("dExpCsv").onclick=exportCsv;
   document.getElementById("dExpJson").onclick=exportJson;
   document.getElementById("dImp").onclick=()=>document.getElementById("dFile").click();
-  document.getElementById("dFile").onchange=e=>{if(e.target.files[0])importFile(e.target.files[0]);e.target.value="";};
+  document.getElementById("dFile").onchange=e=>{if(e.target.files[0])importFile(e.target.files[0],"restore");e.target.value="";};
+  document.getElementById("dImpCsv").onclick=()=>document.getElementById("dFileCsv").click();
+  document.getElementById("dFileCsv").onchange=e=>{if(e.target.files[0])importFile(e.target.files[0],"add");e.target.value="";};
   document.getElementById("dAddAcct").onclick=addAccountSheet;
   document.getElementById("dAddTmpl").onclick=()=>templateSheet(null);
   ["fFrom","fOther","jAcct","lAcct","fGainAc"].forEach(id=>attachPicker(document.getElementById(id)));
@@ -2086,5 +2410,6 @@ async function init(){
 }
 init();
 </script>
+<div id="printArea"></div>
 </body>
 </html>
